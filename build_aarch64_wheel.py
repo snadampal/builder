@@ -228,6 +228,7 @@ def build_ArmComputeLibrary(host: RemoteHost, git_clone_flags: str = "") -> None
     print('Building Arm Compute Library')
     host.run_cmd("mkdir $HOME/acl")
     host.run_cmd(f"git clone https://github.com/ARM-software/ComputeLibrary.git -b v22.11 {git_clone_flags}")
+    host.run_cmd(f"pushd ComputeLibrary; git fetch https://review.mlplatform.org/ml/ComputeLibrary && git cherry-pick --no-commit d2475c721e; git fetch https://review.mlplatform.org/ml/ComputeLibrary refs/changes/68/9068/4 && git cherry-pick --no-commit FETCH_HEAD; popd")
     host.run_cmd(f"pushd ComputeLibrary; export acl_install_dir=$HOME/acl; scons Werror=1 -j8 debug=0 neon=1 opencl=0 os=linux openmp=1 cppthreads=0 arch=armv8.2-a multi_isa=1 build=native build_dir=$acl_install_dir/build; cp -r arm_compute $acl_install_dir; cp -r include $acl_install_dir; cp -r utils $acl_install_dir; cp -r support $acl_install_dir; popd")
 
 
@@ -519,9 +520,12 @@ def start_build(host: RemoteHost, *,
     if host.using_docker():
         build_vars += " CMAKE_SHARED_LINKER_FLAGS=-Wl,-z,max-page-size=0x10000"
     if enable_mkldnn:
+        # temp change to cherrypick the patches that are still under review
+        host.run_cmd(f"cd $HOME; git clone https://github.com/snadampal/builder.git; cd builder; git checkout pt2.0_dev")
         build_ArmComputeLibrary(host, git_clone_flags)
         print("build pytorch with mkldnn+acl backend")
         build_vars += " USE_MKLDNN=ON USE_MKLDNN_ACL=ON"
+        host.run_cmd(f"pushd pytorch; patch -p1 < $HOME/builder/patches/pytorch_addmm_91763.patch; patch -p1 < $HOME/builder/patches/pytorch_c10_thp_93888.patch; popd")
         host.run_cmd(f"cd pytorch ; export ACL_ROOT_DIR=$HOME/ComputeLibrary:$HOME/acl; {build_vars} python3 setup.py bdist_wheel")
         print('Repair the wheel')
         pytorch_wheel_name = host.list_dir("pytorch/dist")[0]

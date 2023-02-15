@@ -1,0 +1,110 @@
+From 11a81624ab72e7ce0f08e59ff31cf3d6acc3541c Mon Sep 17 00:00:00 2001
+From: Sunita Nadampalli <nadampal@amazon.com>
+Date: Mon, 13 Feb 2023 15:33:24 +0000
+Subject: [PATCH] pytorch_c10_thp_93888
+
+---
+ c10/core/alignment.h        | 10 ++++++++++
+ c10/core/impl/alloc_cpu.cpp | 25 +++++++++++++++++++++++++
+ c10/core/impl/alloc_cpu.h   | 13 +++++++++++++
+ third_party/ideep           |  2 +-
+ 4 files changed, 49 insertions(+), 1 deletion(-)
+
+diff --git a/c10/core/alignment.h b/c10/core/alignment.h
+index 4a8c732ef4..97ccfa728a 100644
+--- a/c10/core/alignment.h
++++ b/c10/core/alignment.h
+@@ -1,6 +1,9 @@
+ #pragma once
+ 
+ #include <cstddef>
++#ifdef __linux__
++#include <unistd.h>
++#endif
+ 
+ namespace c10 {
+ 
+@@ -14,4 +17,11 @@ constexpr size_t gAlignment = 16;
+ constexpr size_t gAlignment = 64;
+ #endif
+ 
++#ifdef __linux__
++// inorder to enable thp, buffers need to be page aligned
++const long gPagesize = sysconf(_SC_PAGESIZE);
++// for kernels that don't provide page size, default it to 4K
++const size_t gAlignment_thp = (gPagesize < 0 ? 4096 : gPagesize);
++#endif
++
+ } // namespace c10
+diff --git a/c10/core/impl/alloc_cpu.cpp b/c10/core/impl/alloc_cpu.cpp
+index 6ca9ea1096..65c19017c4 100644
+--- a/c10/core/impl/alloc_cpu.cpp
++++ b/c10/core/impl/alloc_cpu.cpp
+@@ -70,6 +70,31 @@ void* alloc_cpu(size_t nbytes) {
+       "DefaultCPUAllocator: not enough memory: you tried to allocate ",
+       nbytes,
+       " bytes.");
++#elif defined(__linux__)
++  int err = 0;
++  if (gIs_c10_thp_mem_alloc_enabled && nbytes >= gAlloc_threshold_thp) {
++    // inorder to enable thp, buffers need to be page aligned
++    err = posix_memalign(&data, gAlignment_thp, nbytes);
++  } else {
++    err = posix_memalign(&data, gAlignment, nbytes);
++  }
++  CAFFE_ENFORCE(
++      err == 0,
++      "DefaultCPUAllocator: can't allocate memory: you tried to allocate ",
++      nbytes,
++      " bytes. Error code ",
++      err,
++      " (",
++      strerror(err),
++      ")");
++  // enable thp (transparent huge pages) for larger buffers
++  if (gIs_c10_thp_mem_alloc_enabled && nbytes >= gAlloc_threshold_thp) {
++    int ret = madvise(data, nbytes, MADV_HUGEPAGE);
++    if (ret != 0) {
++      TORCH_WARN_ONCE(
++          "thp madvise for HUGEPAGE failed with %s\n", strerror(errno));
++    }
++  }
+ #else
+   int err = posix_memalign(&data, gAlignment, nbytes);
+   CAFFE_ENFORCE(
+diff --git a/c10/core/impl/alloc_cpu.h b/c10/core/impl/alloc_cpu.h
+index dc0f97f0f3..e65ab3fd41 100644
+--- a/c10/core/impl/alloc_cpu.h
++++ b/c10/core/impl/alloc_cpu.h
+@@ -4,8 +4,21 @@
+ 
+ #include <cstddef>
+ 
++#ifdef __linux__
++#include <sys/mman.h>
++#include <cstdlib>
++#endif
++
+ namespace c10 {
+ 
++#ifdef __linux__
++// since the default thp pagesize is 2MB, enable thp only
++// for buffers of size 2MB or larger to avoid memory bloating
++constexpr size_t gAlloc_threshold_thp = 2 * 1024 * 1024;
++static const char* thp_env = std::getenv("C10_THP_MEM_ALLOC_ENABLE");
++const bool gIs_c10_thp_mem_alloc_enabled = std::atoi(thp_env != nullptr ? thp_env : "0");
++#endif
++
+ C10_API void* alloc_cpu(size_t nbytes);
+ C10_API void free_cpu(void* data);
+ 
+diff --git a/third_party/ideep b/third_party/ideep
+index e7925bc7c2..d226a995ff 160000
+--- a/third_party/ideep
++++ b/third_party/ideep
+@@ -1 +1 @@
+-Subproject commit e7925bc7c260e6c4481ccb53b7d29c59a901a05d
++Subproject commit d226a995ff05109097cc227da6995a9be82a73f4
+-- 
+2.25.1
+

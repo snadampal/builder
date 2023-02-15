@@ -1,0 +1,129 @@
+From 8d7190d7fd1e203d8b118c9dbed65bd0cb0fb757 Mon Sep 17 00:00:00 2001
+From: Sunita Nadampalli <nadampal@amazon.com>
+Date: Wed, 15 Feb 2023 21:49:08 +0000
+Subject: [PATCH] [aarch64] addmm mkldnn acceleration
+
+---
+ BUILD.bazel                                  |  1 +
+ aten/src/ATen/Config.h.in                    |  1 +
+ aten/src/ATen/native/LinearAlgebra.cpp       | 10 ++++++++++
+ aten/src/ATen/test/verify_api_visibility.cpp |  4 ++++
+ buckbuild.bzl                                |  4 ++++
+ cmake/Dependencies.cmake                     |  5 +++++
+ 6 files changed, 25 insertions(+)
+
+diff --git a/BUILD.bazel b/BUILD.bazel
+index 887647b236..0de6cfb184 100644
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -260,6 +260,7 @@ header_template_rule(
+     include = "aten/src",
+     substitutions = {
+         "@AT_MKLDNN_ENABLED@": "1",
++        "@AT_MKLDNN_ACL_ENABLED@": "0",
+         "@AT_MKL_ENABLED@": "1",
+         "@AT_MKL_SEQUENTIAL@": "0",
+         "@AT_FFTW_ENABLED@": "0",
+diff --git a/aten/src/ATen/Config.h.in b/aten/src/ATen/Config.h.in
+index e13502acd6..ca2e08e6a3 100644
+--- a/aten/src/ATen/Config.h.in
++++ b/aten/src/ATen/Config.h.in
+@@ -7,6 +7,7 @@
+ // DO NOT put the macros for CUDA libraries in this file; they belong in cuda/CUDAConfig.h
+ 
+ #define AT_MKLDNN_ENABLED() @AT_MKLDNN_ENABLED@
++#define AT_MKLDNN_ACL_ENABLED() @AT_MKLDNN_ACL_ENABLED@
+ #define AT_MKL_ENABLED() @AT_MKL_ENABLED@
+ #define AT_MKL_SEQUENTIAL() @AT_MKL_SEQUENTIAL@
+ #define AT_FFTW_ENABLED() @AT_FFTW_ENABLED@
+diff --git a/aten/src/ATen/native/LinearAlgebra.cpp b/aten/src/ATen/native/LinearAlgebra.cpp
+index 60d2566459..c43e389132 100644
+--- a/aten/src/ATen/native/LinearAlgebra.cpp
++++ b/aten/src/ATen/native/LinearAlgebra.cpp
+@@ -1414,6 +1414,16 @@ static void addmm_impl_cpu_(
+   AT_DISPATCH_ALL_TYPES_AND_COMPLEX_AND(kBFloat16,
+       result.scalar_type(), "addmm_impl_cpu_",
+       [&]{
++#if defined(__aarch64__) && AT_MKLDNN_ACL_ENABLED()
++        // On AArch64 if LHS matrix in BLAS routine is transposed but RHS is not then
++        // it is faster to call oneDNN matrix multiplication primitive with RHS*LHS
++        // that will call then into ACL GEMM kernel and also additionally have support
++        // for running kernel with BF16 instructions
++        if(use_mkldnn_bf16_matmul(b, a, c) && transpose_a && !transpose_b && result.scalar_type() == at::ScalarType::Float) {
++            mkldnn_matmul(b, a, c, beta.to<float>(), alpha.to<float>());
++            return;
++        }
++#endif
+         using opmath_t = at::opmath_type<scalar_t>;
+         at::native::cpublas::gemm(
+             transpose_a ? a.is_conj() ? TransposeType::ConjTranspose : TransposeType::Transpose : TransposeType::NoTranspose,
+diff --git a/aten/src/ATen/test/verify_api_visibility.cpp b/aten/src/ATen/test/verify_api_visibility.cpp
+index 3384023acb..5878ed352e 100644
+--- a/aten/src/ATen/test/verify_api_visibility.cpp
++++ b/aten/src/ATen/test/verify_api_visibility.cpp
+@@ -12,6 +12,10 @@
+ #error "AT_MKLDNN_ENABLED should not be visible in public headers"
+ #endif
+ 
++#ifdef AT_MKLDNN_ACL_ENABLED
++#error "AT_MKLDNN_ACL_ENABLED should not be visible in public headers"
++#endif
++
+ #ifdef CAFFE2_STATIC_LINK_CUDA
+ #error "CAFFE2_STATIC_LINK_CUDA should not be visible in public headers"
+ #endif
+diff --git a/buckbuild.bzl b/buckbuild.bzl
+index 3d55ab7041..c5774857fc 100644
+--- a/buckbuild.bzl
++++ b/buckbuild.bzl
+@@ -216,6 +216,7 @@ def get_aten_preprocessor_flags():
+         "-DCAFFE2_USE_LITE_PROTO",
+         "-DATEN_CUDNN_ENABLED_FBXPLAT=0",
+         "-DATEN_MKLDNN_ENABLED_FBXPLAT=0",
++        "-DATEN_MKLDNN_ACL_ENABLED_FBXPLAT=0",
+         "-DATEN_NNPACK_ENABLED_FBXPLAT=0",
+         "-DATEN_MKL_ENABLED_FBXPLAT=0",
+         "-DATEN_MKL_SEQUENTIAL_FBXPLAT=0",
+@@ -1036,6 +1037,9 @@ def define_buck_targets(
+             "@AT_MKLDNN_ENABLED@",
+             "ATEN_MKLDNN_ENABLED_FBXPLAT",
+             "--replace",
++            "@AT_MKLDNN_ACL_ENABLED@",
++            "ATEN_MKLDNN_ACL_ENABLED_FBXPLAT",
++            "--replace",
+             "@AT_MKL_ENABLED@",
+             "ATEN_MKL_ENABLED_FBXPLAT",
+             "--replace",
+diff --git a/cmake/Dependencies.cmake b/cmake/Dependencies.cmake
+index 03f5167802..51621b6345 100644
+--- a/cmake/Dependencies.cmake
++++ b/cmake/Dependencies.cmake
+@@ -177,6 +177,7 @@ else()
+   set(BLAS "Eigen" CACHE STRING "Selected BLAS library")
+   set(AT_MKLDNN_ENABLED 0)
+   set(AT_MKL_ENABLED 0)
++  set(AT_MKLDNN_ACL_ENABLED 0)
+ endif()
+ set_property(CACHE BLAS PROPERTY STRINGS "ATLAS;BLIS;Eigen;FLAME;Generic;MKL;OpenBLAS;vecLib")
+ message(STATUS "Trying to find preferred BLAS backend of choice: " ${BLAS})
+@@ -1790,6 +1791,7 @@ if(NOT INTERN_BUILD_MOBILE)
+   endif()
+ 
+   set(AT_MKLDNN_ENABLED 0)
++  set(AT_MKLDNN_ACL_ENABLED 0)
+   if(USE_MKLDNN)
+     if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+       message(WARNING
+@@ -1798,6 +1800,9 @@ if(NOT INTERN_BUILD_MOBILE)
+         "Turn this warning off by USE_MKLDNN=OFF.")
+       set(USE_MKLDNN OFF)
+     endif()
++    if(USE_MKLDNN_ACL)
++      set(AT_MKLDNN_ACL_ENABLED 1)
++    endif()
+   endif()
+   if(USE_MKLDNN)
+     include(${CMAKE_CURRENT_LIST_DIR}/public/mkldnn.cmake)
+-- 
+2.25.1
+
