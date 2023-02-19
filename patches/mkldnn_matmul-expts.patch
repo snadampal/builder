@@ -1,0 +1,57 @@
+From 6aabdb54a455d57604cf64beb46c5b4f7ca51fab Mon Sep 17 00:00:00 2001
+From: Sunita Nadampalli <nadampal@amazon.com>
+Date: Sun, 19 Feb 2023 14:15:39 +0000
+Subject: [PATCH] mkldnn matmul expt
+
+---
+ aten/src/ATen/native/LinearAlgebra.cpp | 27 +++++++++++++++++++++++++-
+ 1 file changed, 26 insertions(+), 1 deletion(-)
+
+diff --git a/aten/src/ATen/native/LinearAlgebra.cpp b/aten/src/ATen/native/LinearAlgebra.cpp
+index a0531c50c96..74ded513b95 100644
+--- a/aten/src/ATen/native/LinearAlgebra.cpp
++++ b/aten/src/ATen/native/LinearAlgebra.cpp
+@@ -1420,6 +1420,30 @@ static void addmm_impl_cpu_(
+   AT_DISPATCH_ALL_TYPES_AND_COMPLEX_AND(kBFloat16,
+       result.scalar_type(), "addmm_impl_cpu_",
+       [&]{
++//#if defined(__aarch64__) && AT_MKLDNN_ACL_ENABLED()
++        // On AArch64 if LHS matrix in BLAS routine is transposed but RHS is not then
++        // it is faster to call oneDNN matrix multiplication primitive with RHS*LHS
++        // that will call then into ACL GEMM kernel and also additionally have support
++        // for running kernel with BF16 instructions
++        if(transpose_a && !transpose_b && !(b.sizes()[0] % 8) && result.scalar_type() == at::ScalarType::Float) {
++        //printf("mkldnn matmul1\n");    
++	
++// const auto b_sizes = b.sizes();
++// const auto a_sizes = a.sizes();
++
++//  int64_t contraction_size1 = b_sizes[1];
++//  int64_t res_rows1 = b_sizes[0];
++//  int64_t res_cols1 = a_sizes[1];
++
++// printf("b_size[0][%ld], b_size[1][%ld], a_size[0][%ld], a_size[1][%ld]\n",b_sizes[0], b_sizes[1], a_sizes[0], a_sizes[1]);
++
++//	if ((res_rows1 % 8) == 0){
++//	printf("mkldnn matmul1\n");
++		mkldnn_matmul(b, a, c, beta.to<float>(), alpha.to<float>());
++            return;
++  //      }
++	}
++//#endif
+         using opmath_t = at::opmath_type<scalar_t>;
+         at::native::cpublas::gemm(
+             transpose_a ? a.is_conj() ? TransposeType::ConjTranspose : TransposeType::Transpose : TransposeType::NoTranspose,
+@@ -1652,7 +1676,8 @@ static inline void bmm_out_or_baddbmm_(const Tensor& self_or_result_, const Tens
+             || (strides[1] == 1 && strides[2] >= sizes[1]);
+   };
+ 
+-  if (use_mkldnn_bf16_matmul(batch1, batch2, self_or_result)){
++  if ((!(res_rows % 8)) && use_mkldnn_bf16_matmul(batch1, batch2, self_or_result)){
++//	  printf("mkldnn_matmul2 \n");
+     mkldnn_matmul(batch1, batch2, self_or_result, beta.to<float>(), alpha.to<float>());
+     return;
+   }
+-- 
+2.25.1
+

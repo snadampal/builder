@@ -43,7 +43,7 @@ def ec2_get_instances(filter_name, filter_value):
     return ec2.instances.filter(Filters=[{'Name': filter_name, 'Values': [filter_value]}])
 
 
-def ec2_instances_of_type(instance_type='t4g.2xlarge'):
+def ec2_instances_of_type(instance_type='c6g.16xlarge'):
     return ec2_get_instances('instance-type', instance_type)
 
 
@@ -52,10 +52,10 @@ def ec2_instances_by_id(instance_id):
     return rc[0] if len(rc) > 0 else None
 
 
-def start_instance(key_name, ami=ubuntu18_04_ami, instance_type='t4g.2xlarge'):
+def start_instance(key_name, ami=ubuntu18_04_ami, instance_type='c6g.16xlarge'):
     inst = ec2.create_instances(ImageId=ami,
                                 InstanceType=instance_type,
-                                SecurityGroups=['ssh-allworld'],
+                                SecurityGroups=['default'],
                                 KeyName=key_name,
                                 MinCount=1,
                                 MaxCount=1,
@@ -521,11 +521,11 @@ def start_build(host: RemoteHost, *,
         build_vars += " CMAKE_SHARED_LINKER_FLAGS=-Wl,-z,max-page-size=0x10000"
     if enable_mkldnn:
         # temp change to cherrypick the patches that are still under review
-        host.run_cmd(f"cd $HOME; git clone https://github.com/snadampal/builder.git; cd builder; git checkout pt2.0_dev")
+        host.run_cmd(f"cd $HOME; git clone https://github.com/snadampal/builder.git; cd builder; git checkout pt2.0_dev_expt")
         build_ArmComputeLibrary(host, git_clone_flags)
         print("build pytorch with mkldnn+acl backend")
         build_vars += " USE_MKLDNN=ON USE_MKLDNN_ACL=ON"
-        host.run_cmd(f"pushd pytorch; patch -p1 < $HOME/builder/patches/pytorch_addmm_91763.patch; patch -p1 < $HOME/builder/patches/pytorch_c10_thp_93888.patch; popd")
+        host.run_cmd(f"pushd pytorch; patch -p1 < $HOME/builder/patches/mkldnn_matmul-expts.patch; patch -p1 < $HOME/builder/patches/pytorch_c10_thp_93888.patch; popd")
         host.run_cmd(f"cd pytorch ; export ACL_ROOT_DIR=$HOME/ComputeLibrary:$HOME/acl; {build_vars} python3 setup.py bdist_wheel")
         print('Repair the wheel')
         pytorch_wheel_name = host.list_dir("pytorch/dist")[0]
