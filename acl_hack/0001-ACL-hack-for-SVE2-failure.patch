@@ -1,0 +1,45 @@
+From a0fe211cf078524175e6dc3cde678cf935d33cca Mon Sep 17 00:00:00 2001
+From: Sunita Nadampalli <nadampal@amazon.com>
+Date: Tue, 7 Mar 2023 04:01:39 +0000
+Subject: [PATCH] ACL hack for SVE2 failure
+
+---
+ SConscript | 6 +++---
+ SConstruct | 4 ++--
+ 2 files changed, 5 insertions(+), 5 deletions(-)
+
+diff --git a/SConscript b/SConscript
+index 86f9fa8..c93d80e 100644
+--- a/SConscript
++++ b/SConscript
+@@ -102,9 +102,9 @@ def build_lib_objects():
+     lib_shared_objs += build_obj_list(filedefs["armv8.2-a-sve"], lib_files_sve, static=False)
+ 
+     # Build the SVE2 specific files
+-    arm_compute_env.Append(CPPDEFINES = ['ARM_COMPUTE_ENABLE_SVE2'])
+-    lib_static_objs += build_obj_list(filedefs["armv8.6-a-sve2"], lib_files_sve2, static=True)
+-    lib_shared_objs += build_obj_list(filedefs["armv8.6-a-sve2"], lib_files_sve2, static=False)
++    #arm_compute_env.Append(CPPDEFINES = ['ARM_COMPUTE_ENABLE_SVE2'])
++    #lib_static_objs += build_obj_list(filedefs["armv8.6-a-sve2"], lib_files_sve2, static=True)
++    #lib_shared_objs += build_obj_list(filedefs["armv8.6-a-sve2"], lib_files_sve2, static=False)
+ 
+     return lib_static_objs, lib_shared_objs
+ 
+diff --git a/SConstruct b/SConstruct
+index 220e118..c5be6d7 100644
+--- a/SConstruct
++++ b/SConstruct
+@@ -283,8 +283,8 @@ env.Append(CPPDEFINES = ['ENABLE_NEON', 'ARM_COMPUTE_ENABLE_NEON'])
+ 
+ if 'sve' in env['arch']:
+     env.Append(CPPDEFINES = ['ENABLE_SVE', 'ARM_COMPUTE_ENABLE_SVE'])
+-    if 'sve2' in env['arch']:
+-        env.Append(CPPDEFINES = ['ARM_COMPUTE_ENABLE_SVE2'])
++    #if 'sve2' in env['arch']:
++        #env.Append(CPPDEFINES = ['ARM_COMPUTE_ENABLE_SVE2'])
+ 
+ # Add architecture specific flags
+ if env['multi_isa']:
+-- 
+2.39.2
+
