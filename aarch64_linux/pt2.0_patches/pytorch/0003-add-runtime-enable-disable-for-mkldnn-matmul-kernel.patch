@@ -1,0 +1,64 @@
+From cf002dcb898bda699b0fd94467d259f6fd3109be Mon Sep 17 00:00:00 2001
+From: Sunita Nadampalli <nadampal@amazon.com>
+Date: Thu, 16 Mar 2023 00:32:24 +0000
+Subject: [PATCH 3/3] add runtime enable/disable for mkldnn matmul kernel
+
+this control allows applications to disable the mkldnn matmul
+backend if the additional graph rewrite and onednn overhead
+is not acceptable for any matmul tensors.
+
+export TORCH_MKLDNN_MATMUL_ENABLE=0, to disable.
+---
+ aten/src/ATen/native/LinearAlgebra.cpp | 22 +++++++++++++++++++---
+ 1 file changed, 19 insertions(+), 3 deletions(-)
+
+diff --git a/aten/src/ATen/native/LinearAlgebra.cpp b/aten/src/ATen/native/LinearAlgebra.cpp
+index c7a0ed480b5..484522728a6 100644
+--- a/aten/src/ATen/native/LinearAlgebra.cpp
++++ b/aten/src/ATen/native/LinearAlgebra.cpp
+@@ -1309,6 +1309,20 @@ Tensor outer(const Tensor& self, const Tensor& vec2) {
+   return self.reshape_symint({self.sym_size(0), 1}) * vec2;
+ }
+ 
++#ifdef __aarch64__
++static inline bool is_mkldnn_matmul_enabled() {
++  static auto value = [&] {
++    const char* ptr = std::getenv("TORCH_MKLDNN_MATMUL_ENABLE");
++    return ptr != nullptr ? std::atoi(ptr) : 1;
++  }();
++  return value;
++}
++#else
++static constexpr bool is_mkldnn_matmul_enabled() {
++  return true;
++}
++#endif
++
+ static void addmm_impl_cpu_(
+     Tensor &result, const Tensor &self, Tensor m1, Tensor m2, const Scalar& beta, const Scalar& alpha) {
+   TORCH_INTERNAL_ASSERT(self.dim() == 2 && m1.dim() == 2 && m2.dim() == 2);
+@@ -1425,7 +1439,7 @@ static void addmm_impl_cpu_(
+         // it is faster to call oneDNN matrix multiplication primitive with RHS*LHS
+         // that will call then into ACL GEMM kernel and also additionally have support
+         // for running kernel with BF16 instructions
+-        if(transpose_a && !transpose_b && result.scalar_type() == at::ScalarType::Float) {
++        if(is_mkldnn_matmul_enabled() && transpose_a && !transpose_b && result.scalar_type() == at::ScalarType::Float) {
+             mkldnn_matmul(b, a, c, beta.to<float>(), alpha.to<float>());
+             return;
+         }
+@@ -1662,8 +1676,10 @@ static inline void bmm_out_or_baddbmm_(const Tensor& self_or_result_, const Tens
+             || (strides[1] == 1 && strides[2] >= sizes[1]);
+   };
+ 
+-  if (use_mkldnn_bf16_matmul(batch1, batch2, self_or_result)){
+-    mkldnn_matmul(batch1, batch2, self_or_result, beta.to<float>(), alpha.to<float>());
++  if (is_mkldnn_matmul_enabled() &&
++      use_mkldnn_bf16_matmul(batch1, batch2, self_or_result)) {
++    mkldnn_matmul(
++        batch1, batch2, self_or_result, beta.to<float>(), alpha.to<float>());
+     return;
+   }
+ 
+-- 
+2.25.1
+

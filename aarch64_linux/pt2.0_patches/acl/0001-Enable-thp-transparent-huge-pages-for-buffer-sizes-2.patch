@@ -1,0 +1,93 @@
+From 64b592e496ca9fca02132f93c6979cfedb67b1f3 Mon Sep 17 00:00:00 2001
+From: Sunita Nadampalli <nadampal@amazon.com>
+Date: Fri, 3 Feb 2023 16:53:13 +0000
+Subject: [PATCH 1/2] Enable thp(transparent huge pages) for buffer sizes >=2MB
+
+The 2MB thp pages provide better allocation latencies
+compared to the standard 4KB pages. This change has shown
+significant improvement for batch mode usecases where
+the tensor sizes are larger than 100MB.
+
+Signed-off-by: Sunita Nadampalli <nadampal@amazon.com>
+Change-Id: I74062453ca5f1af588e88b663ab2cc695be1bfea
+---
+ arm_compute/runtime/MemoryRegion.h | 39 +++++++++++++++++++++++++++++-
+ 1 file changed, 38 insertions(+), 1 deletion(-)
+
+diff --git a/arm_compute/runtime/MemoryRegion.h b/arm_compute/runtime/MemoryRegion.h
+index 6408deceaa..af5c7f8687 100644
+--- a/arm_compute/runtime/MemoryRegion.h
++++ b/arm_compute/runtime/MemoryRegion.h
+@@ -1,5 +1,6 @@
+ /*
+  * Copyright (c) 2018-2020 Arm Limited.
++ * Copyright 2023 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+  *
+  * SPDX-License-Identifier: MIT
+  *
+@@ -27,9 +28,22 @@
+ #include "arm_compute/runtime/IMemoryRegion.h"
+ 
+ #include "arm_compute/core/Error.h"
++#include "arm_compute/core/Log.h"
+ 
+ #include <cstddef>
+ 
++#if !defined(BARE_METAL) && !defined(_WIN64) && !defined(__APPLE__) && !defined(__OpenBSD__)
++#include <sys/mman.h>
++#include <cstring>
++#include <unistd.h>
++#include <errno.h>
++const long page_size = sysconf(_SC_PAGESIZE);
++/*  Since the default thp pagesize is 2MB, enable thp only
++ *  for buffers of size 2MB or larger to avoid memory bloating
++ */
++constexpr long thp_allocation_threshold = 2*1024*1024;
++#endif /* !defined(BARE_METAL) && !defined(_WIN64) && !defined(__APPLE__) && !defined(__OpenBSD__) */
++
+ namespace arm_compute
+ {
+ /** Memory region CPU implementation */
+@@ -47,8 +61,16 @@ public:
+         if(size != 0)
+         {
+             // Allocate backing memory
++#if !defined(BARE_METAL) && !defined(_WIN64) && !defined(__APPLE__) && !defined(__OpenBSD__)
++            // Use thp (transparent huge pages) for buffers larger than 2MB
++            if (size >= thp_allocation_threshold)
++            {
++                // Inorder to enable thp, buffers need to be page aligned
++                alignment = page_size;
++            }
++#endif /* !defined(BARE_METAL) && !defined(_WIN64) && !defined(__APPLE__) && !defined(__OpenBSD__) */
+             size_t space = size + alignment;
+-            _mem         = std::shared_ptr<uint8_t>(new uint8_t[space](), [](uint8_t *ptr)
++            _mem         = std::shared_ptr<uint8_t>(new uint8_t[space], [](uint8_t *ptr)
+             {
+                 delete[] ptr;
+             });
+@@ -61,6 +83,21 @@ public:
+                 std::align(alignment, size, aligned_ptr, space);
+                 _ptr = aligned_ptr;
+             }
++
++            if (_ptr != nullptr)
++            {
++#if !defined(BARE_METAL) && !defined(_WIN64) && !defined(__APPLE__) && !defined(__OpenBSD__)
++                if (size >= thp_allocation_threshold)
++                {
++                    int ret = madvise(_ptr, size, MADV_HUGEPAGE);
++                    if (ret != 0)
++                    {
++                    ARM_COMPUTE_LOG_INFO_MSG_WITH_FORMAT_CORE("thp madvise setting failed with err[%s]", strerror(errno));
++                    }
++                }
++#endif /* !defined(BARE_METAL) && !defined(_WIN64) && !defined(__APPLE__) && !defined(__OpenBSD__) */
++                memset(_ptr, 0x0, size);
++            }
+         }
+     }
+     MemoryRegion(void *ptr, size_t size)
+-- 
+2.25.1
+

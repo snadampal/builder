@@ -1,0 +1,181 @@
+From e1e210a61f48a9d1fc6c7d3eb0cf7385e85a8da0 Mon Sep 17 00:00:00 2001
+From: Milos Puzovic <Milos.Puzovic@arm.com>
+Date: Thu, 16 Mar 2023 00:18:28 +0000
+Subject: [PATCH 2/3] Call to mkldnn_matmul from aten::addmm on AArch64
+
+We have noticed that on BERT_pytorch in torchbenchmark
+majority of time is spent in running GEMM in aten:addmm.
+At the moment this calls into BLAS routine, but on AArch64
+it will be faster if it calls into mkldnn_matmul. Performance wise
+compared to build with OpenBLAS it runs faster 1.2x faster on 16 cores
+with batch size of 8 on Graviton3, while if fast math mode (mkldnn_matmul exposes
+through oneDNN and Arm Compute Library option to run GEMM with FP32 inputs
+using BBF16 operations) is enabled then it is 2.3x
+---
+ BUILD.bazel                                  |  1 +
+ aten/src/ATen/Config.h.in                    |  1 +
+ aten/src/ATen/native/LinearAlgebra.cpp       | 10 +++++++
+ aten/src/ATen/native/mkldnn/Matmul.cpp       | 28 +++++++++++---------
+ aten/src/ATen/test/verify_api_visibility.cpp |  4 +++
+ buckbuild.bzl                                |  4 +++
+ cmake/Dependencies.cmake                     |  5 ++++
+ 7 files changed, 40 insertions(+), 13 deletions(-)
+
+diff --git a/BUILD.bazel b/BUILD.bazel
+index 843b27a8f83..931c3437bda 100644
+--- a/BUILD.bazel
++++ b/BUILD.bazel
+@@ -260,6 +260,7 @@ header_template_rule(
+     include = "aten/src",
+     substitutions = {
+         "@AT_MKLDNN_ENABLED@": "1",
++        "@AT_MKLDNN_ACL_ENABLED@": "0",
+         "@AT_MKL_ENABLED@": "1",
+         "@AT_MKL_SEQUENTIAL@": "0",
+         "@AT_FFTW_ENABLED@": "0",
+diff --git a/aten/src/ATen/Config.h.in b/aten/src/ATen/Config.h.in
+index e13502acd6f..ca2e08e6a33 100644
+--- a/aten/src/ATen/Config.h.in
++++ b/aten/src/ATen/Config.h.in
+@@ -7,6 +7,7 @@
+ // DO NOT put the macros for CUDA libraries in this file; they belong in cuda/CUDAConfig.h
+ 
+ #define AT_MKLDNN_ENABLED() @AT_MKLDNN_ENABLED@
++#define AT_MKLDNN_ACL_ENABLED() @AT_MKLDNN_ACL_ENABLED@
+ #define AT_MKL_ENABLED() @AT_MKL_ENABLED@
+ #define AT_MKL_SEQUENTIAL() @AT_MKL_SEQUENTIAL@
+ #define AT_FFTW_ENABLED() @AT_FFTW_ENABLED@
+diff --git a/aten/src/ATen/native/LinearAlgebra.cpp b/aten/src/ATen/native/LinearAlgebra.cpp
+index a0531c50c96..c7a0ed480b5 100644
+--- a/aten/src/ATen/native/LinearAlgebra.cpp
++++ b/aten/src/ATen/native/LinearAlgebra.cpp
+@@ -1420,6 +1420,16 @@ static void addmm_impl_cpu_(
+   AT_DISPATCH_ALL_TYPES_AND_COMPLEX_AND(kBFloat16,
+       result.scalar_type(), "addmm_impl_cpu_",
+       [&]{
++#if defined(__aarch64__) && AT_MKLDNN_ACL_ENABLED()
++        // On AArch64 if LHS matrix in BLAS routine is transposed but RHS is not then
++        // it is faster to call oneDNN matrix multiplication primitive with RHS*LHS
++        // that will call then into ACL GEMM kernel and also additionally have support
++        // for running kernel with BF16 instructions
++        if(transpose_a && !transpose_b && result.scalar_type() == at::ScalarType::Float) {
++            mkldnn_matmul(b, a, c, beta.to<float>(), alpha.to<float>());
++            return;
++        }
++#endif
+         using opmath_t = at::opmath_type<scalar_t>;
+         at::native::cpublas::gemm(
+             transpose_a ? a.is_conj() ? TransposeType::ConjTranspose : TransposeType::Transpose : TransposeType::NoTranspose,
+diff --git a/aten/src/ATen/native/mkldnn/Matmul.cpp b/aten/src/ATen/native/mkldnn/Matmul.cpp
+index 383d2965923..2d82ae8937a 100644
+--- a/aten/src/ATen/native/mkldnn/Matmul.cpp
++++ b/aten/src/ATen/native/mkldnn/Matmul.cpp
+@@ -130,23 +130,25 @@ void mkldnn_matmul(
+               (mat1.dim() == 1 && mat2.dim() == 1),  // aten::dot
+               "mkldnn_matmul:  unsupported dims for mat and mat2");
+ 
++#if defined(__aarch64__)
++  // oneDNN fast-maths mode (enabled by setting the environment variable ONEDNN_DEFAULT_FPMATH_MODE=BF16) will dispatch
++  // fp32 inputs to bf16 kernels where HW permits. So, both fp32 and bf16 inputs are permitted.
++  TORCH_CHECK((mat1.scalar_type() == mat2.scalar_type()) && (mat1.scalar_type() == result.scalar_type()) &&
++              ((mat1.scalar_type() == at::kFloat) || (mat1.scalar_type() == at::kBFloat16)),
++              "mkldnn_matmul:  only enabled for fp32 and bf16 path");
++  // device needs to support bf16 if the inputs are of bf16 type
++  if (mat1.scalar_type() == at::kBFloat16) {
++    TORCH_CHECK(mkldnn_bf16_device_check_arm(),
++                "mkldnn_matmul: mkldnn_matmul bf16 path needs a cpu with bf16 support");
++  }
++#else
+   TORCH_CHECK(mkldnn_bf16_device_check(),
+     "mkldnn_matmul: mkldnn_matmul bf16 path needs the cpu support avx512bw, avx512vl and avx512dq, or AWS Graviton3");
+ 
+-#if defined(__aarch64__)
+-  if (mkldnn_bf16_device_check_arm()) {
+-     //onednn fastmath mode can leverage bf16 HW even for the fp32 input, e.g. Arm Neoverse V1
+-     //so, don't restrict the mkldnn_matmul only for bf16 inputs, allow it for float as well
+-     TORCH_CHECK((mat1.scalar_type() == mat2.scalar_type()) && (mat1.scalar_type() == result.scalar_type()) &&
+-                 ((mat1.scalar_type() == at::kFloat) || (mat1.scalar_type() == at::kBFloat16)),
+-                 "mkldnn_matmul:  only enabled for fp32 and bf16 path");
+-  } else
++   TORCH_CHECK(mat1.scalar_type() == at::kBFloat16 &&
++               mat2.scalar_type() == at::kBFloat16 &&
++               result.scalar_type() == at::kBFloat16, "mkldnn_matmul:  only enabled for bf16 path");
+ #endif
+-  {
+-     TORCH_CHECK(mat1.scalar_type() == at::kBFloat16 &&
+-                 mat2.scalar_type() == at::kBFloat16 &&
+-                 result.scalar_type() == at::kBFloat16, "mkldnn_matmul:  only enabled for bf16 path");
+-  }
+ 
+   auto mat1_unsqueezed = mat1.dim() == 1 ? mat1.unsqueeze(0) : mat1;
+   auto mat2_unsqueezed = mat2.dim() == 1 ? mat2.unsqueeze(1) : mat2;
+diff --git a/aten/src/ATen/test/verify_api_visibility.cpp b/aten/src/ATen/test/verify_api_visibility.cpp
+index 3384023acb7..5878ed352e5 100644
+--- a/aten/src/ATen/test/verify_api_visibility.cpp
++++ b/aten/src/ATen/test/verify_api_visibility.cpp
+@@ -12,6 +12,10 @@
+ #error "AT_MKLDNN_ENABLED should not be visible in public headers"
+ #endif
+ 
++#ifdef AT_MKLDNN_ACL_ENABLED
++#error "AT_MKLDNN_ACL_ENABLED should not be visible in public headers"
++#endif
++
+ #ifdef CAFFE2_STATIC_LINK_CUDA
+ #error "CAFFE2_STATIC_LINK_CUDA should not be visible in public headers"
+ #endif
+diff --git a/buckbuild.bzl b/buckbuild.bzl
+index dd12c242eca..b0124fe7f79 100644
+--- a/buckbuild.bzl
++++ b/buckbuild.bzl
+@@ -245,6 +245,7 @@ def get_aten_preprocessor_flags():
+         "-DCAFFE2_USE_LITE_PROTO",
+         "-DATEN_CUDNN_ENABLED_FBXPLAT=0",
+         "-DATEN_MKLDNN_ENABLED_FBXPLAT=0",
++        "-DATEN_MKLDNN_ACL_ENABLED_FBXPLAT=0",
+         "-DATEN_NNPACK_ENABLED_FBXPLAT=0",
+         "-DATEN_MKL_ENABLED_FBXPLAT=0",
+         "-DATEN_MKL_SEQUENTIAL_FBXPLAT=0",
+@@ -1042,6 +1043,9 @@ def define_buck_targets(
+             "@AT_MKLDNN_ENABLED@",
+             "ATEN_MKLDNN_ENABLED_FBXPLAT",
+             "--replace",
++            "@AT_MKLDNN_ACL_ENABLED@",
++            "ATEN_MKLDNN_ACL_ENABLED_FBXPLAT",
++            "--replace",
+             "@AT_MKL_ENABLED@",
+             "ATEN_MKL_ENABLED_FBXPLAT",
+             "--replace",
+diff --git a/cmake/Dependencies.cmake b/cmake/Dependencies.cmake
+index 8c0e3c24bc5..9373b1c7fae 100644
+--- a/cmake/Dependencies.cmake
++++ b/cmake/Dependencies.cmake
+@@ -171,6 +171,7 @@ endif()
+ 
+ # ---[ BLAS
+ 
++set(AT_MKLDNN_ACL_ENABLED 0)
+ # setting default preferred BLAS options if not already present.
+ if(NOT INTERN_BUILD_MOBILE)
+   set(BLAS "MKL" CACHE STRING "Selected BLAS library")
+@@ -1741,6 +1742,7 @@ if(NOT INTERN_BUILD_MOBILE)
+   endif()
+ 
+   set(AT_MKLDNN_ENABLED 0)
++  set(AT_MKLDNN_ACL_ENABLED 0)
+   if(USE_MKLDNN)
+     if(NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
+       message(WARNING
+@@ -1749,6 +1751,9 @@ if(NOT INTERN_BUILD_MOBILE)
+         "Turn this warning off by USE_MKLDNN=OFF.")
+       set(USE_MKLDNN OFF)
+     endif()
++    if(USE_MKLDNN_ACL)
++      set(AT_MKLDNN_ACL_ENABLED 1)
++    endif()
+   endif()
+   if(USE_MKLDNN)
+     include(${CMAKE_CURRENT_LIST_DIR}/public/mkldnn.cmake)
+-- 
+2.25.1
+
