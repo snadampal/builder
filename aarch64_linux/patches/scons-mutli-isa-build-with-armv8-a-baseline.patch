@@ -1,0 +1,55 @@
+From 431406071e6489a74be9b2b42f4ab2b5f9047b93 Mon Sep 17 00:00:00 2001
+From: Sunita Nadampalli <nadampal@amazon.com>
+Date: Wed, 29 Mar 2023 15:29:34 +0000
+Subject: [PATCH] [scons] mutli isa build with armv8-a baseline
+
+---
+ SConscript    | 4 ++--
+ SConstruct    | 2 +-
+ filedefs.json | 2 +-
+ 3 files changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/SConscript b/SConscript
+index 86f9fa8086..6cd5f093a6 100644
+--- a/SConscript
++++ b/SConscript
+@@ -94,8 +94,8 @@ def build_lib_objects():
+                            'ARM_COMPUTE_ENABLE_I8MM', 'ARM_COMPUTE_ENABLE_SVEF32MM'])
+ 
+     # Build all the common files for the base architecture
+-    lib_static_objs += build_obj_list(filedefs["armv8.2-a"], lib_files, static=True)
+-    lib_shared_objs += build_obj_list(filedefs["armv8.2-a"], lib_files, static=False)
++    lib_static_objs += build_obj_list(filedefs["armv8-a"], lib_files, static=True)
++    lib_shared_objs += build_obj_list(filedefs["armv8-a"], lib_files, static=False)
+ 
+     # Build the SVE specific files
+     lib_static_objs += build_obj_list(filedefs["armv8.2-a-sve"], lib_files_sve, static=True)
+diff --git a/SConstruct b/SConstruct
+index 220e118020..abb9533b4b 100644
+--- a/SConstruct
++++ b/SConstruct
+@@ -297,7 +297,7 @@ if env['multi_isa']:
+         if "disable_mmla_fp" not in env['custom_options']:
+             env.Append(CPPDEFINES = ['ARM_COMPUTE_ENABLE_SVEF32MM'])
+ 
+-    env.Append(CXXFLAGS = ['-march=armv8.2-a+fp16']) # explicitly enable fp16 extension otherwise __ARM_FEATURE_FP16_VECTOR_ARITHMETIC is undefined
++    env.Append(CXXFLAGS = ['-march=armv8-a']) #note: __ARM_FEATURE_FP16_VECTOR_ARITHMETIC will be undefined
+ 
+ else: # NONE "multi_isa" builds
+ 
+diff --git a/filedefs.json b/filedefs.json
+index 3422eeb252..8ffa3d9cd9 100644
+--- a/filedefs.json
++++ b/filedefs.json
+@@ -2,7 +2,7 @@
+     "cpu": {
+         "arch" : {
+             "armv8-a": {
+-                "cxxflags": ["-march=armv8.2-a"]
++                "cxxflags": ["-march=armv8-a"]
+             },
+             "armv8.2-a": {
+                 "cxxflags": ["-march=armv8.2-a+fp16"],
+-- 
+2.25.1
+
