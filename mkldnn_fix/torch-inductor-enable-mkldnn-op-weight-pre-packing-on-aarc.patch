@@ -1,0 +1,106 @@
+From fade410d3fd56ed090b5696c447d42e6498e0e79 Mon Sep 17 00:00:00 2001
+From: Sunita Nadampalli <nadampal@amazon.com>
+Date: Tue, 5 Dec 2023 20:46:00 +0000
+Subject: [PATCH] [inductor] enable mkldnn op weight pre-packing on aarch64
+
+This PR enables the fx passes and mkldnn optimizations for aarch64.
+It improved the bert inference performance up to 5.8x on AWS c7g instance
+when compared torch.compile() vs no compile path. This is enabled
+when pytorch is built with USE_MKLDNN_ACL option on aarch64.
+---
+ .../mkldnn/RegisterMkldnnOpContextClass.cpp   |  9 ++++++++
+ torch/_inductor/fx_passes/mkldnn_fusion.py    | 23 +++++++++++++------
+ 2 files changed, 25 insertions(+), 7 deletions(-)
+
+diff --git a/aten/src/ATen/native/mkldnn/RegisterMkldnnOpContextClass.cpp b/aten/src/ATen/native/mkldnn/RegisterMkldnnOpContextClass.cpp
+index c1517204ce1..ea63f16ef08 100644
+--- a/aten/src/ATen/native/mkldnn/RegisterMkldnnOpContextClass.cpp
++++ b/aten/src/ATen/native/mkldnn/RegisterMkldnnOpContextClass.cpp
+@@ -27,6 +27,14 @@ static bool is_mkldnn_fp16_supported() {
+   return mkldnn_fp16_device_check();
+ }
+ 
++constexpr bool is_mkldnn_acl_supported() {
++#if defined(__aarch64__) && AT_MKLDNN_ACL_ENABLED()
++  return true;
++#else
++  return false;
++#endif
++}
++
+ TORCH_LIBRARY(mkldnn, m) {
+   m.class_<ConvOpContext>(TORCH_SELECTIVE_CLASS("ConvOpContext"))
+       .def_pickle(
+@@ -69,6 +77,7 @@ TORCH_LIBRARY(mkldnn, m) {
+       "mkldnn::_reorder_mkldnn_rnn_layer_weight(Tensor weight0, Tensor weight1, int hidden_size, bool reverse, bool has_biases, bool batch_first, int[]? input_size=None) -> Tensor[] Y"));
+   m.def("_is_mkldnn_bf16_supported", &is_mkldnn_bf16_supported);
+   m.def("_is_mkldnn_fp16_supported", &is_mkldnn_fp16_supported);
++  m.def("_is_mkldnn_acl_supported", &is_mkldnn_acl_supported);
+ }
+ 
+ TORCH_LIBRARY(mkldnn_prepacked, m) {
+diff --git a/torch/_inductor/fx_passes/mkldnn_fusion.py b/torch/_inductor/fx_passes/mkldnn_fusion.py
+index 38448961551..81044c0af7c 100644
+--- a/torch/_inductor/fx_passes/mkldnn_fusion.py
++++ b/torch/_inductor/fx_passes/mkldnn_fusion.py
+@@ -822,9 +822,12 @@ if torch._C._has_mkldnn:
+             return False
+         batch_size = input_meta_value.shape[0]
+         is_bf16_weight = weight_meta_value.dtype == torch.bfloat16
+-        # for fp32, mkl should be enabled and batch_size should not be a free symbol.
+-        if not is_bf16_weight and (
+-            (not torch._C.has_mkl) or has_free_symbols(batch_size)
++        # on x86, for fp32, mkl should be enabled and batch_size should not be a free symbol.
++        # on aarch64, use mkldnn op for fp32 as well if acl is enabled
++        if (
++            not is_bf16_weight
++            and not mkldnn._is_mkldnn_acl_supported()
++            and ((not torch._C.has_mkl) or has_free_symbols(batch_size))
+         ):
+             return False
+         for meta_value in [input_meta_value, weight_meta_value]:
+@@ -999,7 +1002,7 @@ if torch._C._has_mkldnn:
+                 batch_size = input.meta.get("val").shape[0]
+                 if has_free_symbols(batch_size):
+                     assert (
+-                        is_bf16_weight
++                        is_bf16_weight or mkldnn._is_mkldnn_acl_supported()
+                     ), f"only bf16 weight prepacking supports dynamic shape inputs but got {weight_dtype}"
+                 # For bfloat16 dynamic shape path, using input size hint to pack weight for a better performance.
+                 packed_weight_inputs = (
+@@ -1010,7 +1013,7 @@ if torch._C._has_mkldnn:
+                 )
+                 packed_weight_op = (
+                     mkldnn._reorder_linear_weight
+-                    if is_bf16_weight
++                    if (is_bf16_weight or mkldnn._is_mkldnn_acl_supported())
+                     else torch.ops.mkl._mkl_reorder_linear_weight
+                 )
+                 packed_weight_node = graph.create_node(
+@@ -1018,7 +1021,7 @@ if torch._C._has_mkldnn:
+                 )
+ 
+                 packed_linear_inputs: Tuple[Any, ...] = (input, packed_weight_node)
+-                if is_bf16_weight:
++                if is_bf16_weight or mkldnn._is_mkldnn_acl_supported():
+                     packed_linear_inputs += (bias, "none", [], "")
+                     packed_linear_op = mkldnn._linear_pointwise.default
+                 else:
+@@ -1070,7 +1073,13 @@ if torch._C._has_mkldnn:
+ 
+     @functools.lru_cache(None)
+     def _mkldnn_fusion_init():
+-        if torch.backends.mkldnn.enabled and torch.backends.mkldnn.is_available():
++        # TODO: aarch64: enable op fusion for acl once it supports fused operators. Disabling it for now.
++        # Otherwise even the matmul or innerproduct can not be accelerated with acl
++        if (
++            torch.backends.mkldnn.enabled
++            and torch.backends.mkldnn.is_available()
++            and not torch.ops.mkldnn._is_mkldnn_acl_supported()
++        ):
+             _register_unary_fusion()
+             _register_inplace_fusion()
+             _register_binary_unary_fusion()
+-- 
+2.34.1
+
