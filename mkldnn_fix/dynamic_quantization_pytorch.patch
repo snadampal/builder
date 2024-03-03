@@ -1,0 +1,41 @@
+From 9d08f82dfda3adcdf052fc3805e8609dd621a0e7 Mon Sep 17 00:00:00 2001
+From: Sunita Nadampalli <nadampal@amazon.com>
+Date: Sun, 3 Mar 2024 19:42:37 +0000
+Subject: [PATCH] aarch64: pytorch: dynamic quantization changes
+
+---
+ aten/src/ATen/native/LinearAlgebra.cpp                 | 2 +-
+ aten/src/ATen/native/quantized/cpu/qlinear_dynamic.cpp | 4 ++--
+ 2 files changed, 3 insertions(+), 3 deletions(-)
+
+diff --git a/aten/src/ATen/native/LinearAlgebra.cpp b/aten/src/ATen/native/LinearAlgebra.cpp
+index 397b546fbb..21087a6e16 100644
+--- a/aten/src/ATen/native/LinearAlgebra.cpp
++++ b/aten/src/ATen/native/LinearAlgebra.cpp
+@@ -1499,7 +1499,7 @@ static void addmm_impl_cpu_(
+   // additionally have support for running kernel with BF16 instructions
+   if (transpose_c) {
+     bool apply_heur = apply_mkldnn_matmul_heur(b.sizes()[0], b.sizes()[1], a.sizes()[1]);
+-    if (apply_heur && transpose_a && !transpose_b && result.scalar_type() == at::ScalarType::Float) {
++    if (apply_heur && transpose_a && !transpose_b && transpose_c && result.scalar_type() == at::ScalarType::Float) {
+       try {
+         mkldnn_matmul(b, a, c, beta.to<float>(), alpha.to<float>());
+         // We have dispatched to ACL GEMM for single precision float
+diff --git a/aten/src/ATen/native/quantized/cpu/qlinear_dynamic.cpp b/aten/src/ATen/native/quantized/cpu/qlinear_dynamic.cpp
+index f871877073..47b3094cdd 100644
+--- a/aten/src/ATen/native/quantized/cpu/qlinear_dynamic.cpp
++++ b/aten/src/ATen/native/quantized/cpu/qlinear_dynamic.cpp
+@@ -530,8 +530,8 @@ at::Tensor PackedLinearWeightsOnednn::apply_dynamic_impl(
+   auto q_params = quant_utils::ChooseQuantizationParams(
+       /*min=*/x_min,
+       /*max=*/x_max,
+-      /*qmin=*/0,
+-      /*qmax=*/(1 << precision) - 1,
++      /*qmin=*/-127,
++      /*qmax=*/128, //(1 << precision) - 1,
+       /*preserve_sparsity=*/false,
+       /*force_scale_power_of_two=*/false,
+       /*reduce_range=*/reduce_range);
+-- 
+2.34.1
+
